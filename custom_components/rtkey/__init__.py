@@ -1,7 +1,8 @@
 import asyncio
+import json
 import logging
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -12,6 +13,7 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import selector
+from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from yarl import URL
 
 DOMAIN = "rtkey"
@@ -153,12 +155,23 @@ class CameraTokenInfo:
     user_token: str | None = None
 
 
+@dataclass
+class _ApiResponse:
+    status: int
+    body: bytes
+
+
 _DEFAULT_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
     "Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
     "Referer": "https://key.rt.ru/",
     "Origin": "https://key.rt.ru",
 }
+
+
+def _mkdir_parents(p: Path):
+    """Path.mkdir с keyword args для executor."""
+    p.mkdir(parents=True, exist_ok=True)
 
 
 class RTKeyCamerasApi:
@@ -188,8 +201,8 @@ class RTKeyCamerasApi:
 
         self.user_token: str | None = None
 
-        # aiohttp session
-        self._session: aiohttp.ClientSession | None = None
+        # HA managed aiohttp session
+        self._session: aiohttp.ClientSession = async_get_clientsession(hass)
 
         # Информация о камерах
         self.camera_tokens: dict[str, CameraTokenInfo] = {}
@@ -221,35 +234,22 @@ class RTKeyCamerasApi:
 
         self.ffmpeg_available = False
 
-    def _get_session(self) -> aiohttp.ClientSession:
-        if self._session is None or self._session.closed:
-            self._session = aiohttp.ClientSession()
-        return self._session
-
     async def async_initialize(self):
         await self._check_ffmpeg()
         await self._ensure_media_dirs()
 
     async def _ensure_media_dirs(self):
-        """Создаём базовую структуру папок для архивов и скриншотов."""
         base = self._get_media_base_path() / self.archive_path
-
-        dirs_to_create = [
-            base / "archives",
-            base / "screenshots",
-        ]
-
+        dirs_to_create = [base / "archives", base / "screenshots"]
         for dir_path in dirs_to_create:
-            await self.hass.async_add_executor_job(dir_path.mkdir, True, True)
+            await self.hass.async_add_executor_job(_mkdir_parents, dir_path)
             _LOGGER.info(f"Медиа-папка: {dir_path}")
-
         _LOGGER.info(f"Базовый путь для медиа: {base}")
 
     async def _ensure_intercom_dirs(self, intercom_ids: list[str]):
-        """Создаём подпапки для каждого домофона после загрузки их списка."""
         for intercom_id in intercom_ids:
             for dir_path in (self._get_archive_dir(intercom_id), self._get_screenshot_dir(intercom_id)):
-                await self.hass.async_add_executor_job(dir_path.mkdir, True, True)
+                await self.hass.async_add_executor_job(_mkdir_parents, dir_path)
 
     async def _check_ffmpeg(self):
         try:
@@ -268,27 +268,15 @@ class RTKeyCamerasApi:
             self.ffmpeg_available = False
             _LOGGER.error(f"Ошибка проверки FFmpeg: {e}")
 
-    async def _close_session(self):
-        if self._session and not self._session.closed:
-            await self._session.close()
-            self._session = None
-
     # === Медиа-пути ===
 
     def _get_media_base_path(self) -> Path:
-        """Получаем базовый путь для медиафайлов.
-
-        HA default media folder — hass.config.path("media").
-        Если user configured media_dirs в configuration.yaml — используем
-        ключ 'media' (default) или 'local' если 'media' отсутствует.
-        """
         media_dirs = self.hass.config.media_dirs
         if media_dirs:
             if "media" in media_dirs:
                 return Path(media_dirs["media"])
             if "local" in media_dirs:
                 return Path(media_dirs["local"])
-
         return Path(self.hass.config.path("media"))
 
     def _get_archive_dir(self, intercom_id: str) -> Path:
@@ -310,7 +298,7 @@ class RTKeyCamerasApi:
             return None
 
         archive_dir = self._get_archive_dir(intercom_id)
-        await self.hass.async_add_executor_job(archive_dir.mkdir, True, True)
+        await self.hass.async_add_executor_job(_mkdir_parents, archive_dir)
 
         dt = datetime.fromtimestamp(event_timestamp, tz=self._local_tz)
         filename = dt.strftime("%Y-%m-%d_%H-%M-%S.mp4")
@@ -366,7 +354,7 @@ class RTKeyCamerasApi:
 
     async def download_event_screenshot(self, camera_id: str, event_timestamp: int, intercom_id: str) -> str | None:
         screenshot_dir = self._get_screenshot_dir(intercom_id)
-        await self.hass.async_add_executor_job(screenshot_dir.mkdir, True, True)
+        await self.hass.async_add_executor_job(_mkdir_parents, screenshot_dir)
 
         dt = datetime.fromtimestamp(event_timestamp, tz=self._local_tz)
         filename = dt.strftime("%Y-%m-%d_%H-%M-%S.jpg")
@@ -385,7 +373,6 @@ class RTKeyCamerasApi:
         return None
 
     async def cleanup_old_files(self, directory: Path, pattern: str, max_copies: int):
-        """Удаляем старые файлы, если превышено количество копий (async via executor)."""
         def _cleanup():
             if not directory.exists():
                 return
@@ -424,31 +411,33 @@ class RTKeyCamerasApi:
             except Exception as e:
                 _LOGGER.error(f"Ошибка в event listener: {e}")
 
-    # === HTTP API (aiohttp) ===
+    # === HTTP API (aiohttp, HA managed session) ===
 
-    async def _api_get(self, url: str | URL, headers: dict, timeout: int = 20) -> aiohttp.ClientResponse | None:
-        session = self._get_session()
+    async def _api_get(self, url: str | URL, headers: dict, timeout: int = 20) -> _ApiResponse | None:
+        """GET-запрос. Читает body внутри context manager, возвращает status + bytes."""
         try:
-            async with session.get(
+            async with self._session.get(
                 url,
                 headers=headers,
                 timeout=aiohttp.ClientTimeout(total=timeout),
             ) as r:
-                return r
+                body = await r.read()
+                return _ApiResponse(status=r.status, body=body)
         except (aiohttp.ClientError, asyncio.TimeoutError) as e:
             _LOGGER.error(f"HTTP ошибка GET {url}: {e}")
             return None
 
-    async def _api_post(self, url: str | URL, headers: dict, json: dict | None = None, timeout: int = 10) -> aiohttp.ClientResponse | None:
-        session = self._get_session()
+    async def _api_post(self, url: str | URL, headers: dict, json_data: dict | None = None, timeout: int = 10) -> _ApiResponse | None:
+        """POST-запрос. Читает body внутри context manager."""
         try:
-            async with session.post(
+            async with self._session.post(
                 url,
                 headers=headers,
-                json=json or {},
+                json=json_data or {},
                 timeout=aiohttp.ClientTimeout(total=timeout),
             ) as r:
-                return r
+                body = await r.read()
+                return _ApiResponse(status=r.status, body=body)
         except (aiohttp.ClientError, asyncio.TimeoutError) as e:
             _LOGGER.error(f"HTTP ошибка POST {url}: {e}")
             return None
@@ -470,7 +459,7 @@ class RTKeyCamerasApi:
                 return []
 
             if r.status == 200:
-                data = await r.json()
+                data = json.loads(r.body)
                 devices = data.get("data", [])
 
                 if devices:
@@ -528,7 +517,7 @@ class RTKeyCamerasApi:
                 return {"data": {"devices": []}}
 
             if r.status == 200:
-                data = await r.json()
+                data = json.loads(r.body)
                 self._build_intercom_mappings(data)
 
                 devices = data.get("data", {}).get("devices", [])
@@ -630,7 +619,7 @@ class RTKeyCamerasApi:
                 return None
 
             if r.status == 200:
-                image_data = await r.read()
+                image_data = r.body
                 if len(image_data) > 2000:
                     async with self._image_cache_lock:
                         self._image_cache[camera_id] = (image_data, time.time())
@@ -671,7 +660,7 @@ class RTKeyCamerasApi:
                 return None
 
             if r.status == 200:
-                content = await r.read()
+                content = r.body
                 if len(content) > 1000:
                     _LOGGER.info(f"Скриншот события получен {camera_id} ({len(content)} байт)")
                     return content
@@ -789,7 +778,7 @@ class RTKeyCamerasApi:
                 return None
 
             if r.status == 200:
-                data = await r.json()
+                data = json.loads(r.body)
                 items = data.get("data", {}).get("items", [])
                 if items:
                     return items[0]
@@ -896,7 +885,6 @@ class RTKeyCamerasApi:
             except asyncio.CancelledError:
                 pass
             self._events_polling_task = None
-        await self._close_session()
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
