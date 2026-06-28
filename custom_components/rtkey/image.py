@@ -1,6 +1,6 @@
 from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Any
-
 from homeassistant.components.image import ImageEntity
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, callback
@@ -8,7 +8,6 @@ from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.event import async_track_time_interval
 from homeassistant.helpers.entity import EntityCategory
 from zoneinfo import ZoneInfo
-
 from . import CONF_CAMERA_IMAGE_REFRESH_INTERVAL, DOMAIN, RTKeyCamerasApi, _LOGGER
 
 
@@ -19,8 +18,7 @@ async def async_setup_entry(
 ) -> None:
     cameras_api: RTKeyCamerasApi = hass.data[DOMAIN][config_entry.entry_id]["cameras_api"]
     cameras_info = await cameras_api.get_cameras_info()
-
-    # Проверяем, включены ли обычные скриншоты
+    
     interval = config_entry.options.get(CONF_CAMERA_IMAGE_REFRESH_INTERVAL, 60)
 
     entities = []
@@ -34,15 +32,15 @@ async def async_setup_entry(
     else:
         _LOGGER.info("Обычные скриншоты отключены (interval=0)")
 
-    # Скриншоты событий
-    if cameras_api.event_screenshot_enabled:
+    # 🆕 Скриншоты событий только если screenshot_copies > 0
+    if cameras_api.screenshot_copies > 0:
         intercoms_info = await cameras_api.get_intercoms_info()
         for intercom_info in intercoms_info.get("data", {}).get("devices", []):
             entities.append(
                 RTKeyEventImage(hass, config_entry, cameras_api, intercom_info)
             )
     else:
-        _LOGGER.info("Скриншоты событий отключены")
+        _LOGGER.info("Скриншоты событий отключены (screenshot_copies=0)")
 
     async_add_entities(entities)
 
@@ -97,8 +95,6 @@ class RTKeyCameraImageEntity(ImageEntity):
         await super().async_will_remove_from_hass()
 
     async def _async_update_image(self, now: datetime | None = None) -> None:
-        """Продолжаем опрашивать API даже если камера недоступна,
-        чтобы узнать, когда она снова появится."""
         try:
             image = await self.cameras_api.get_camera_image(self.camera_id)
             if image:
@@ -114,12 +110,10 @@ class RTKeyCameraImageEntity(ImageEntity):
 
     @property
     def available(self) -> bool:
-        """Сущность доступна, если камера не в списке недоступных."""
         return self.cameras_api.is_camera_available(self.camera_id)
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
-        """Атрибуты с динамической проверкой доступности камеры."""
         if self.cameras_api.is_camera_available(self.camera_id):
             status = self._device_status_title
         else:
@@ -147,7 +141,7 @@ class RTKeyCameraImageEntity(ImageEntity):
 
 
 class RTKeyEventImage(ImageEntity):
-    """Скриншот на момент последнего события домофона."""
+    """Скриншот на момент последнего события домофона (локальный файл)."""
 
     _attr_should_poll = False
     _attr_entity_category = EntityCategory.DIAGNOSTIC
@@ -176,7 +170,8 @@ class RTKeyEventImage(ImageEntity):
         self._attr_name = "Скриншот события"
 
         self._attr_image_last_updated = None
-        self._cached_image: bytes | None = None
+        self._screenshot_path = None
+        self._screenshot_error = None
         self._event_description = None
         self._event_time = None
 
@@ -201,13 +196,15 @@ class RTKeyEventImage(ImageEntity):
         if not event_info:
             return
 
-        screenshot_data = event_info.get("screenshot_data")
-        if screenshot_data:
-            self._cached_image = screenshot_data
+        screenshot_path = event_info.get("screenshot_path")
+        screenshot_error = event_info.get("screenshot_error")
+        
+        if screenshot_path:
+            self._screenshot_path = screenshot_path
+            self._screenshot_error = None
             self._event_description = event_info.get("description")
             self._event_time = event_info.get("local_time")
 
-            # ✅ Используем время события, а не текущее время
             event_timestamp = event_info.get("timestamp")
             if event_timestamp:
                 self._attr_image_last_updated = datetime.fromtimestamp(
@@ -219,9 +216,25 @@ class RTKeyEventImage(ImageEntity):
 
             self.async_write_ha_state()
             _LOGGER.debug(f"Обновлён скриншот события для {self.device_name}")
+        elif screenshot_error:
+            self._screenshot_error = screenshot_error
+            self.async_write_ha_state()
 
     async def async_image(self) -> bytes | None:
-        return self._cached_image
+        """Читаем скриншот с диска."""
+        if self._screenshot_path and Path(self._screenshot_path).exists():
+            try:
+                return await self.hass.async_add_executor_job(
+                    Path(self._screenshot_path).read_bytes
+                )
+            except Exception as e:
+                _LOGGER.error(f"Ошибка чтения скриншота {self._screenshot_path}: {e}")
+        return None
+
+    @property
+    def available(self) -> bool:
+        """Доступна, если есть локальный файл."""
+        return self._screenshot_path is not None and Path(self._screenshot_path).exists()
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
@@ -230,6 +243,10 @@ class RTKeyEventImage(ImageEntity):
             attrs["Событие"] = self._event_description
         if self._event_time:
             attrs["Время"] = self._event_time
+        if self._screenshot_path:
+            attrs["Путь к скриншоту"] = self._screenshot_path
+        if self._screenshot_error:
+            attrs["Ошибка скачивания"] = self._screenshot_error
         return attrs
 
     @property

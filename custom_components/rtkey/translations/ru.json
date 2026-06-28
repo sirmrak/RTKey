@@ -14,15 +14,18 @@
           "events_refresh_interval": "Интервал опроса событий (сек)",
           "event_time_lag": "Задержка времени камеры (сек)",
           "pre_event_seconds": "Секунд до события для показа",
-          "event_screenshot_enabled": "Создавать сущность скриншота события",
           "event_screenshot_quality": "Качество скриншота события",
-          "event_archive_enabled": "Создавать камеру архива событий",
-          "archive_duration": "Длительность архива (сек)",
-          "event_sensor_enabled": "Создавать сенсор последнего события"
+          "event_sensor_enabled": "Создавать сенсор последнего события",
+          "archive_path": "Путь для сохранения архивов",
+          "archive_copies": "Количество копий видео (0 = отключено)",
+          "screenshot_copies": "Количество копий скриншотов (0 = отключено)"
         },
         "data_description": {
           "token": "Получите токен в браузере через инструменты разработчика (F12) на сайте key.rt.ru",
-          "camera_image_refresh_interval": "0 — отключить периодические скриншоты"
+          "camera_image_refresh_interval": "0 — отключить периодические скриншоты",
+          "archive_path": "Относительно папки /media/ (например: RTKey)",
+          "archive_copies": "Максимальное количество сохранённых видео на домофон",
+          "screenshot_copies": "Максимальное количество сохранённых скриншотов на домофон"
         }
       }
     }
@@ -42,15 +45,18 @@
           "events_refresh_interval": "Интервал опроса событий (сек)",
           "event_time_lag": "Задержка времени камеры (сек)",
           "pre_event_seconds": "Секунд до события для показа",
-          "event_screenshot_enabled": "Создавать сущность скриншота события",
           "event_screenshot_quality": "Качество скриншота события",
-          "event_archive_enabled": "Создавать камеру архива событий",
-          "archive_duration": "Длительность архива (сек)",
-          "event_sensor_enabled": "Создавать сенсор последнего события"
+          "event_sensor_enabled": "Создавать сенсор последнего события",
+          "archive_path": "Путь для сохранения архивов",
+          "archive_copies": "Количество копий видео (0 = отключено)",
+          "screenshot_copies": "Количество копий скриншотов (0 = отключено)"
         },
         "data_description": {
           "token": "Получите токен в браузере через инструменты разработчика (F12) на сайте key.rt.ru",
-          "camera_image_refresh_interval": "0 — отключить периодические скриншоты"
+          "camera_image_refresh_interval": "0 — отключить периодические скриншоты",
+          "archive_path": "Относительно папки /media/ (например: RTKey)",
+          "archive_copies": "Максимальное количество сохранённых видео на домофон",
+          "screenshot_copies": "Максимальное количество сохранённых скриншотов на домофон"
         }
       }
     }

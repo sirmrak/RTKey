@@ -5,7 +5,6 @@ from homeassistant.config_entries import (
     OptionsFlowWithConfigEntry,
 )
 from homeassistant.core import callback
-
 from . import (
     CONF_NAME,
     CONF_TOKEN,
@@ -16,11 +15,11 @@ from . import (
     CONF_EVENTS_REFRESH_INTERVAL,
     CONF_EVENT_TIME_LAG,
     CONF_PRE_EVENT_SECONDS,
-    CONF_EVENT_SCREENSHOT_ENABLED,
     CONF_EVENT_SCREENSHOT_QUALITY,
-    CONF_EVENT_ARCHIVE_ENABLED,
-    CONF_ARCHIVE_DURATION,
     CONF_EVENT_SENSOR_ENABLED,
+    CONF_ARCHIVE_PATH,
+    CONF_ARCHIVE_COPIES,
+    CONF_SCREENSHOT_COPIES,
     DATA_SCHEMA,
     OPTIONS_SCHEMA,
     DOMAIN,
@@ -64,11 +63,10 @@ class RTKeyConfigFlow(ConfigFlow, domain=DOMAIN):
                 options=user_input,
             )
 
-        # ✅ Добавляем add_suggested_values_to_schema для корректной работы переводов
         return self.async_show_form(
             step_id="user",
             data_schema=self.add_suggested_values_to_schema(
                 vol.Schema(DATA_SCHEMA).extend(OPTIONS_SCHEMA),
-                {},  # Пустые значения по умолчанию для первой настройки
+                {},
             ),
         )

@@ -1,13 +1,12 @@
 import datetime
+from pathlib import Path
 from typing import Any
-
 from homeassistant.components.camera import Camera, CameraEntityFeature
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.event import async_track_time_interval
 from homeassistant.helpers.entity import EntityCategory
-
 from . import _LOGGER, DOMAIN, RTKeyCamerasApi, TOKEN_REFRESH_BUFFER
 
 
@@ -18,21 +17,21 @@ async def async_setup_entry(
 ) -> None:
     cameras_api: RTKeyCamerasApi = hass.data[DOMAIN][config_entry.entry_id]["cameras_api"]
     cameras_info = await cameras_api.get_cameras_info()
-
+    
     entities = [
         RTKeyCamera(hass, config_entry, cameras_api, camera_info)
         for camera_info in cameras_info["data"]["items"]
     ]
 
-    # Добавляем архивные камеры событий для домофонов
-    if cameras_api.event_archive_enabled:
+    # 🆕 Добавляем архивные камеры только если archive_copies > 0
+    if cameras_api.archive_copies > 0:
         intercoms_info = await cameras_api.get_intercoms_info()
         for intercom_info in intercoms_info.get("data", {}).get("devices", []):
             entities.append(
                 RTKeyEventCamera(hass, config_entry, cameras_api, intercom_info)
             )
     else:
-        _LOGGER.info("Архивные видео событий отключены")
+        _LOGGER.info("Архивные видео событий отключены (archive_copies=0)")
 
     async_add_entities(entities)
 
@@ -86,7 +85,6 @@ class RTKeyCamera(Camera):
 
     async def _stream_refresh(self, now: datetime.datetime) -> None:
         try:
-            # Если токены протухли — обновляем их перед получением URL
             if self.cameras_api._tokens_invalid:
                 _LOGGER.debug(f"Обнаружены протухшие токены, обновляем для {self.device_name}")
                 await self.cameras_api.refresh_tokens()
@@ -108,12 +106,10 @@ class RTKeyCamera(Camera):
 
     @property
     def available(self) -> bool:
-        """Камера доступна, если она не в списке недоступных."""
         return self.cameras_api.is_camera_available(self.camera_id)
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
-        """Атрибуты с динамической проверкой доступности камеры."""
         if self.cameras_api.is_camera_available(self.camera_id):
             status = self._device_status_title
         else:
@@ -145,7 +141,7 @@ class RTKeyCamera(Camera):
 
 
 class RTKeyEventCamera(Camera):
-    """Камера для просмотра архивного видео на момент последнего события."""
+    """Камера для просмотра архивного видео на момент последнего события (локальный файл)."""
 
     _attr_should_poll = False
     _attr_entity_category = EntityCategory.DIAGNOSTIC
@@ -176,7 +172,8 @@ class RTKeyEventCamera(Camera):
 
         self._event_description = None
         self._event_time = None
-        self._archive_url = None
+        self._archive_path = None
+        self._archive_error = None
 
     async def async_added_to_hass(self) -> None:
         await super().async_added_to_hass()
@@ -199,20 +196,35 @@ class RTKeyEventCamera(Camera):
         if not event_info:
             return
 
-        archive_url = event_info.get("archive_url")
-        if archive_url:
-            self._archive_url = archive_url
+        archive_path = event_info.get("archive_path")
+        archive_error = event_info.get("archive_error")
+        
+        if archive_path:
+            self._archive_path = archive_path
+            self._archive_error = None
             self._event_description = event_info.get("description")
             self._event_time = event_info.get("local_time")
 
             if self.stream:
-                _LOGGER.debug(f"Обновляем URL архива для {self.device_name}")
-                self.stream.update_source(archive_url)
+                _LOGGER.debug(f"Обновляем путь архива для {self.device_name}")
+                # Для локального файла stream не обновляем через update_source
+                # stream_source() будет вызван при запросе
 
+            self.async_write_ha_state()
+        elif archive_error:
+            self._archive_error = archive_error
             self.async_write_ha_state()
 
     async def stream_source(self) -> str | None:
-        return self._archive_url
+        """Возвращаем путь к локальному файлу."""
+        if self._archive_path and Path(self._archive_path).exists():
+            return f"file://{self._archive_path}"
+        return None
+
+    @property
+    def available(self) -> bool:
+        """Доступна, если есть локальный файл."""
+        return self._archive_path is not None and Path(self._archive_path).exists()
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
@@ -221,8 +233,10 @@ class RTKeyEventCamera(Camera):
             attrs["Событие"] = self._event_description
         if self._event_time:
             attrs["Время"] = self._event_time
-        if self._archive_url:
-            attrs["URL архива"] = self._archive_url
+        if self._archive_path:
+            attrs["Путь к архиву"] = self._archive_path
+        if self._archive_error:
+            attrs["Ошибка скачивания"] = self._archive_error
         return attrs
 
     @property
