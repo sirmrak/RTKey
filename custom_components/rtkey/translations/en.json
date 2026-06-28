@@ -1,0 +1,58 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "RT Key Integration",
+        "description": "Setup connection to Rostelecom Key",
+        "data": {
+          "name": "Integration name",
+          "token": "RT Key access token",
+          "camera_image_refresh_interval": "Screenshot refresh interval (sec, 0 = disabled)",
+          "screenshot_quality": "Screenshot quality",
+          "log_level": "Logging level",
+          "events_enabled": "Enable event tracking",
+          "events_refresh_interval": "Event polling interval (sec)",
+          "event_time_lag": "Camera time lag (sec)",
+          "pre_event_seconds": "Seconds before event to show",
+          "event_screenshot_enabled": "Create event screenshot entity",
+          "event_screenshot_quality": "Event screenshot quality",
+          "event_archive_enabled": "Create event archive camera",
+          "archive_duration": "Archive duration (sec)",
+          "event_sensor_enabled": "Create event sensor entity"
+        },
+        "data_description": {
+          "token": "Get token via browser developer tools (F12) on key.rt.ru",
+          "camera_image_refresh_interval": "0 — disable periodic screenshots"
+        }
+      }
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "RT Key Settings",
+        "description": "Modify integration parameters",
+        "data": {
+          "name": "Integration name",
+          "token": "RT Key access token",
+          "camera_image_refresh_interval": "Screenshot refresh interval (sec, 0 = disabled)",
+          "screenshot_quality": "Screenshot quality",
+          "log_level": "Logging level",
+          "events_enabled": "Enable event tracking",
+          "events_refresh_interval": "Event polling interval (sec)",
+          "event_time_lag": "Camera time lag (sec)",
+          "pre_event_seconds": "Seconds before event to show",
+          "event_screenshot_enabled": "Create event screenshot entity",
+          "event_screenshot_quality": "Event screenshot quality",
+          "event_archive_enabled": "Create event archive camera",
+          "archive_duration": "Archive duration (sec)",
+          "event_sensor_enabled": "Create event sensor entity"
+        },
+        "data_description": {
+          "token": "Get token via browser developer tools (F12) on key.rt.ru",
+          "camera_image_refresh_interval": "0 — disable periodic screenshots"
+        }
+      }
+    }
+  }
+}

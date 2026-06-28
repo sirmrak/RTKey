@@ -1,0 +1,58 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Интеграция RT Key",
+        "description": "Настройка подключения к Ростелеком Key",
+        "data": {
+          "name": "Название интеграции",
+          "token": "Токен доступа RT Key",
+          "camera_image_refresh_interval": "Интервал обновления скриншотов (сек, 0 = отключено)",
+          "screenshot_quality": "Качество скриншотов",
+          "log_level": "Уровень логирования",
+          "events_enabled": "Включить отслеживание событий",
+          "events_refresh_interval": "Интервал опроса событий (сек)",
+          "event_time_lag": "Задержка времени камеры (сек)",
+          "pre_event_seconds": "Секунд до события для показа",
+          "event_screenshot_enabled": "Создавать сущность скриншота события",
+          "event_screenshot_quality": "Качество скриншота события",
+          "event_archive_enabled": "Создавать камеру архива событий",
+          "archive_duration": "Длительность архива (сек)",
+          "event_sensor_enabled": "Создавать сенсор последнего события"
+        },
+        "data_description": {
+          "token": "Получите токен в браузере через инструменты разработчика (F12) на сайте key.rt.ru",
+          "camera_image_refresh_interval": "0 — отключить периодические скриншоты"
+        }
+      }
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Настройки RT Key",
+        "description": "Изменение параметров интеграции",
+        "data": {
+          "name": "Название интеграции",
+          "token": "Токен доступа RT Key",
+          "camera_image_refresh_interval": "Интервал обновления скриншотов (сек, 0 = отключено)",
+          "screenshot_quality": "Качество скриншотов",
+          "log_level": "Уровень логирования",
+          "events_enabled": "Включить отслеживание событий",
+          "events_refresh_interval": "Интервал опроса событий (сек)",
+          "event_time_lag": "Задержка времени камеры (сек)",
+          "pre_event_seconds": "Секунд до события для показа",
+          "event_screenshot_enabled": "Создавать сущность скриншота события",
+          "event_screenshot_quality": "Качество скриншота события",
+          "event_archive_enabled": "Создавать камеру архива событий",
+          "archive_duration": "Длительность архива (сек)",
+          "event_sensor_enabled": "Создавать сенсор последнего события"
+        },
+        "data_description": {
+          "token": "Получите токен в браузере через инструменты разработчика (F12) на сайте key.rt.ru",
+          "camera_image_refresh_interval": "0 — отключить периодические скриншоты"
+        }
+      }
+    }
+  }
+}
