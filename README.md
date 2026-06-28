@@ -77,7 +77,7 @@
    Пример:
    ```
    Authorization: Bearer eyJhbGciOiJSUzI1NiIsImtpZCI6...
-                                    ↑ скопируйте отсюда
+                         ↑ скопируйте отсюда
    ```
 
 7. **Вставьте токен** при настройке интеграции в Home Assistant
