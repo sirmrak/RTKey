@@ -1,12 +1,13 @@
 import datetime
 from pathlib import Path
 from typing import Any
-from homeassistant.components.camera import Camera, CameraEntityFeature
+
+from homeassistant.components.camera import Camera
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.device_registry import DeviceInfo
-from homeassistant.helpers.event import async_track_time_interval
 from homeassistant.helpers.entity import EntityCategory
+
 from . import _LOGGER, DOMAIN, RTKeyCamerasApi, TOKEN_REFRESH_BUFFER
 
 
@@ -17,13 +18,12 @@ async def async_setup_entry(
 ) -> None:
     cameras_api: RTKeyCamerasApi = hass.data[DOMAIN][config_entry.entry_id]["cameras_api"]
     cameras_info = await cameras_api.get_cameras_info()
-    
+
     entities = [
         RTKeyCamera(hass, config_entry, cameras_api, camera_info)
         for camera_info in cameras_info["data"]["items"]
     ]
 
-    # 🆕 Добавляем архивные камеры только если archive_copies > 0
     if cameras_api.archive_copies > 0:
         intercoms_info = await cameras_api.get_intercoms_info()
         for intercom_info in intercoms_info.get("data", {}).get("devices", []):
@@ -63,7 +63,6 @@ class RTKeyCamera(Camera):
 
         self._attr_unique_id = f"camera_{self.camera_id}"
         self._attr_name = self.device_name
-        self._attr_supported_features = CameraEntityFeature.STREAM
 
         self._unsub_stream_refresh: Any = None
 
@@ -113,7 +112,7 @@ class RTKeyCamera(Camera):
         if self.cameras_api.is_camera_available(self.camera_id):
             status = self._device_status_title
         else:
-            status = "❌ Нет связи"
+            status = "Нет связи"
 
         attrs = {"Статус": status}
         if self._device_model:
@@ -141,7 +140,7 @@ class RTKeyCamera(Camera):
 
 
 class RTKeyEventCamera(Camera):
-    """Камера для просмотра архивного видео на момент последнего события (локальный файл)."""
+    """Архив события: thumbnail-скриншот + ссылка на видео-файл."""
 
     _attr_should_poll = False
     _attr_entity_category = EntityCategory.DIAGNOSTIC
@@ -168,7 +167,6 @@ class RTKeyEventCamera(Camera):
 
         self._attr_unique_id = f"event_camera_{self.intercom_id}"
         self._attr_name = "Архив события"
-        self._attr_supported_features = CameraEntityFeature.STREAM
 
         self._event_description = None
         self._event_time = None
@@ -198,33 +196,28 @@ class RTKeyEventCamera(Camera):
 
         archive_path = event_info.get("archive_path")
         archive_error = event_info.get("archive_error")
-        
+
         if archive_path:
             self._archive_path = archive_path
             self._archive_error = None
             self._event_description = event_info.get("description")
             self._event_time = event_info.get("local_time")
-
-            if self.stream:
-                _LOGGER.debug(f"Обновляем путь архива для {self.device_name}")
-                # Для локального файла stream не обновляем через update_source
-                # stream_source() будет вызван при запросе
-
             self.async_write_ha_state()
         elif archive_error:
             self._archive_error = archive_error
             self.async_write_ha_state()
 
-    async def stream_source(self) -> str | None:
-        """Возвращаем путь к локальному файлу."""
-        if self._archive_path and Path(self._archive_path).exists():
-            return f"file://{self._archive_path}"
+    async def async_camera_image(
+        self, width: int | None = None, height: int | None = None
+    ) -> bytes | None:
+        """Скриншот камеры как thumbnail для карточки."""
+        if self.camera_id:
+            return await self.cameras_api.get_camera_image(self.camera_id)
         return None
 
     @property
     def available(self) -> bool:
-        """Доступна, если есть локальный файл."""
-        return self._archive_path is not None and Path(self._archive_path).exists()
+        return self.camera_id is not None and self.cameras_api.is_camera_available(self.camera_id)
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:

@@ -304,7 +304,7 @@ class RTKeyCamerasApi:
         filename = dt.strftime("%Y-%m-%d_%H-%M-%S.mp4")
         filepath = archive_dir / filename
 
-        duration = self.pre_event_seconds + self.event_time_lag + self.archive_duration
+        duration = self.archive_duration
 
         _LOGGER.info(f"Скачиваем архив для {intercom_id}: {duration} сек, файл: {filename}")
 
