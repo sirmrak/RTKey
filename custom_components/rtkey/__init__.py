@@ -228,6 +228,28 @@ class RTKeyCamerasApi:
 
     async def async_initialize(self):
         await self._check_ffmpeg()
+        await self._ensure_media_dirs()
+
+    async def _ensure_media_dirs(self):
+        """Создаём базовую структуру папок для архивов и скриншотов."""
+        base = self._get_media_base_path() / self.archive_path
+
+        dirs_to_create = [
+            base / "archives",
+            base / "screenshots",
+        ]
+
+        for dir_path in dirs_to_create:
+            await self.hass.async_add_executor_job(dir_path.mkdir, True, True)
+            _LOGGER.info(f"Медиа-папка: {dir_path}")
+
+        _LOGGER.info(f"Базовый путь для медиа: {base}")
+
+    async def _ensure_intercom_dirs(self, intercom_ids: list[str]):
+        """Создаём подпапки для каждого домофона после загрузки их списка."""
+        for intercom_id in intercom_ids:
+            for dir_path in (self._get_archive_dir(intercom_id), self._get_screenshot_dir(intercom_id)):
+                await self.hass.async_add_executor_job(dir_path.mkdir, True, True)
 
     async def _check_ffmpeg(self):
         try:
@@ -862,6 +884,7 @@ class RTKeyCamerasApi:
             return
 
         await self._fetch_intercoms()
+        await self._ensure_intercom_dirs(self.intercom_ids)
 
         self._events_polling_task = asyncio.create_task(self._events_polling_loop())
 
