@@ -100,9 +100,9 @@ class RTKeyEventSensor(SensorEntity):
             "Тип события": self._event_data.get("event_type", ""),
         }
         
-        archive_url = self._event_data.get("archive_url")
-        if archive_url:
-            attrs["Архив видео"] = archive_url
+        archive_path = self._event_data.get("archive_path")
+        if archive_path:
+            attrs["Архив видео"] = archive_path
         
         event = self._event_data.get("event", {})
         rfid = event.get("rfid")

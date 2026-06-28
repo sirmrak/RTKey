@@ -1,16 +1,18 @@
 import asyncio
-import functools
 import logging
 import time
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
-import requests
+
+import aiohttp
 import voluptuous as vol
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import selector
+from yarl import URL
 
 DOMAIN = "rtkey"
 PLATFORMS = [Platform.CAMERA, Platform.IMAGE, Platform.BUTTON, Platform.SENSOR]
@@ -31,9 +33,10 @@ CONF_PRE_EVENT_SECONDS = "pre_event_seconds"
 CONF_EVENT_SCREENSHOT_QUALITY = "event_screenshot_quality"
 CONF_EVENT_SENSOR_ENABLED = "event_sensor_enabled"
 
-#  Новые настройки для локального хранения
+# Настройки локального хранения
 CONF_ARCHIVE_PATH = "archive_path"
 CONF_ARCHIVE_COPIES = "archive_copies"
+CONF_ARCHIVE_DURATION = "archive_duration"
 CONF_SCREENSHOT_COPIES = "screenshot_copies"
 
 TOKEN_REFRESH_BUFFER = 300
@@ -108,12 +111,19 @@ OPTIONS_SCHEMA = {
             mode=selector.SelectSelectorMode.DROPDOWN,
         )
     ),
-    # 🆕 Настройки локального хранения
+    # Настройки локального хранения
     vol.Optional(CONF_ARCHIVE_PATH, default="media/RTKey"): str,
     vol.Optional(CONF_ARCHIVE_COPIES, default=5): selector.NumberSelector(
         selector.NumberSelectorConfig(
             min=0, max=10, step=1,
             mode=selector.NumberSelectorMode.BOX,
+        )
+    ),
+    vol.Optional(CONF_ARCHIVE_DURATION, default=30): selector.NumberSelector(
+        selector.NumberSelectorConfig(
+            min=10, max=120, step=10,
+            mode=selector.NumberSelectorMode.SLIDER,
+            unit_of_measurement="сек",
         )
     ),
     vol.Optional(CONF_SCREENSHOT_COPIES, default=10): selector.NumberSelector(
@@ -126,13 +136,38 @@ OPTIONS_SCHEMA = {
 }
 
 
+@dataclass
+class CameraTokenInfo:
+    title: str = "Устройство"
+    category_type: str = "unknown"
+    category_title: str = ""
+    model: str = ""
+    vendor: str = ""
+    serial_number: str = ""
+    mac: str = ""
+    ip: str = ""
+    status_type: str = "unknown"
+    status_title: str = ""
+    streamer_token: str | None = None
+    screenshot_token: str | None = None
+    user_token: str | None = None
+
+
+_DEFAULT_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+    "Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
+    "Referer": "https://key.rt.ru/",
+    "Origin": "https://key.rt.ru",
+}
+
+
 class RTKeyCamerasApi:
     def __init__(self, hass: HomeAssistant, entry: ConfigEntry):
         self.hass = hass
         self.entry = entry
         self.token = entry.options.get(CONF_TOKEN) or entry.data.get(CONF_TOKEN, "")
         self.screenshot_quality = entry.options.get(CONF_SCREENSHOT_QUALITY, "medium")
-        
+
         # Настройки событий
         self.events_enabled = entry.options.get(CONF_EVENTS_ENABLED, True)
         self.events_refresh_interval = entry.options.get(CONF_EVENTS_REFRESH_INTERVAL, 15)
@@ -140,116 +175,119 @@ class RTKeyCamerasApi:
         self.pre_event_seconds = entry.options.get(CONF_PRE_EVENT_SECONDS, 10)
         self.event_screenshot_quality = entry.options.get(CONF_EVENT_SCREENSHOT_QUALITY, "large")
         self.event_sensor_enabled = entry.options.get(CONF_EVENT_SENSOR_ENABLED, True)
-        
-        # 🆕 Настройки локального хранения
+
+        # Настройки локального хранения
         self.archive_path = entry.options.get(CONF_ARCHIVE_PATH, "media/RTKey")
         self.archive_copies = entry.options.get(CONF_ARCHIVE_COPIES, 5)
+        self.archive_duration = entry.options.get(CONF_ARCHIVE_DURATION, 30)
         self.screenshot_copies = entry.options.get(CONF_SCREENSHOT_COPIES, 10)
-        
+
         log_level = entry.options.get(CONF_LOG_LEVEL, "INFO")
         _LOGGER.setLevel(getattr(logging, log_level, logging.INFO))
-        _LOGGER.info(f"📊 Уровень логирования: {log_level}")
-        
-        self.user_token = None
-        self.lock = asyncio.Lock()
-        
+        _LOGGER.info(f"Уровень логирования: {log_level}")
+
+        self.user_token: str | None = None
+
+        # aiohttp session
+        self._session: aiohttp.ClientSession | None = None
+
         # Информация о камерах
-        self.camera_tokens = {}
+        self.camera_tokens: dict[str, CameraTokenInfo] = {}
         self._cameras_cache = None
         self._cameras_cache_ts = 0
-        
+
         # Кэш картинок
-        self._image_cache = {}
+        self._image_cache: dict[str, tuple[bytes, float]] = {}
         self._image_cache_lock = asyncio.Lock()
-        
+
         # Отслеживание недоступных камер (404)
         self._unavailable_cameras: set[str] = set()
-        
+
         # Флаг протухших токенов (403)
         self._tokens_invalid = False
         self._tokens_refresh_lock = asyncio.Lock()
-        
+
         # Данные событий
-        self.last_events = {}
-        self._last_request_ids = {}
-        self.rfid_names = {}
-        self.intercom_camera_map = {}
-        self.intercom_ids = []
+        self.last_events: dict[str, dict] = {}
+        self._last_request_ids: dict[str, str] = {}
+        self.rfid_names: dict[str, str] = {}
+        self.intercom_camera_map: dict[str, str] = {}
+        self.intercom_ids: list[str] = []
         self._events_polling_task: asyncio.Task | None = None
-        self._event_listeners = []
-        
+        self._event_listeners: list = []
+
         self._local_tz = ZoneInfo(hass.config.time_zone)
-        _LOGGER.info(f"🕐 Временная зона HA: {hass.config.time_zone}")
-        
-        # 🆕 Проверка FFmpeg
+        _LOGGER.info(f"Временная зона HA: {hass.config.time_zone}")
+
         self.ffmpeg_available = False
-        
+
+    def _get_session(self) -> aiohttp.ClientSession:
+        if self._session is None or self._session.closed:
+            self._session = aiohttp.ClientSession()
+        return self._session
+
     async def async_initialize(self):
-        """Инициализация после создания (для async операций)."""
         await self._check_ffmpeg()
-    
+
     async def _check_ffmpeg(self):
-        """Проверяем наличие FFmpeg в системе."""
         try:
             proc = await asyncio.create_subprocess_exec(
                 "ffmpeg", "-version",
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
-            await proc.communicate()
+            await asyncio.wait_for(proc.communicate(), timeout=5)
             self.ffmpeg_available = True
-            _LOGGER.info("✅ FFmpeg доступен")
+            _LOGGER.info("FFmpeg доступен")
         except FileNotFoundError:
             self.ffmpeg_available = False
-            _LOGGER.error("❌ FFmpeg не найден! Архивное видео будет недоступно.")
-        except Exception as e:
+            _LOGGER.error("FFmpeg не найден! Архивное видео будет недоступно.")
+        except (asyncio.TimeoutError, Exception) as e:
             self.ffmpeg_available = False
-            _LOGGER.error(f"❌ Ошибка проверки FFmpeg: {e}")
-    
+            _LOGGER.error(f"Ошибка проверки FFmpeg: {e}")
+
+    async def _close_session(self):
+        if self._session and not self._session.closed:
+            await self._session.close()
+            self._session = None
+
+    # === Медиа-пути ===
+
     def _get_media_base_path(self) -> Path:
-        """Получаем базовый путь для медиафайлов."""
-        # HA хранит медиа в /media/ (media_dirs)
         media_dirs = self.hass.config.media_dirs
         if media_dirs and "media" in media_dirs:
             return Path(media_dirs["media"])
-        # Fallback
         return Path("/media")
-    
+
     def _get_archive_dir(self, intercom_id: str) -> Path:
-        """Путь к папке архивов для домофона."""
         return self._get_media_base_path() / self.archive_path / "archives" / intercom_id
-    
+
     def _get_screenshot_dir(self, intercom_id: str) -> Path:
-        """Путь к папке скриншотов для домофона."""
         return self._get_media_base_path() / self.archive_path / "screenshots" / intercom_id
-    
+
+    # === Скачивание и cleanup ===
+
     async def download_event_archive(self, camera_id: str, event_timestamp: int, intercom_id: str) -> str | None:
-        """Скачиваем архивное видео через FFmpeg и сохраняем локально."""
         if not self.ffmpeg_available:
             _LOGGER.error("FFmpeg недоступен, пропускаем скачивание архива")
             return None
-        
+
         url = self.get_event_archive_url(camera_id, event_timestamp)
         if not url:
             _LOGGER.error(f"Не удалось получить URL архива для камеры {camera_id}")
             return None
-        
-        # Создаём папку
+
         archive_dir = self._get_archive_dir(intercom_id)
-        archive_dir.mkdir(parents=True, exist_ok=True)
-        
-        # Имя файла
+        await self.hass.async_add_executor_job(archive_dir.mkdir, True, True)
+
         dt = datetime.fromtimestamp(event_timestamp, tz=self._local_tz)
         filename = dt.strftime("%Y-%m-%d_%H-%M-%S.mp4")
         filepath = archive_dir / filename
-        
-        # Вычисляем длительность: pre_event + lag + post_event (archive_duration)
-        # archive_duration по умолчанию 30 сек
-        archive_duration = 30  # Можно вынести в настройки позже
-        duration = self.pre_event_seconds + self.event_time_lag + archive_duration
-        
-        _LOGGER.info(f" Скачиваем архив для {intercom_id}: {duration} сек, файл: {filename}")
-        
+
+        duration = self.pre_event_seconds + self.event_time_lag + self.archive_duration
+
+        _LOGGER.info(f"Скачиваем архив для {intercom_id}: {duration} сек, файл: {filename}")
+
         cmd = [
             "ffmpeg", "-y",
             "-i", url,
@@ -257,7 +295,8 @@ class RTKeyCamerasApi:
             "-c", "copy",
             str(filepath),
         ]
-        
+
+        proc: asyncio.subprocess.Process | None = None
         try:
             proc = await asyncio.create_subprocess_exec(
                 *cmd,
@@ -265,190 +304,212 @@ class RTKeyCamerasApi:
                 stderr=asyncio.subprocess.PIPE,
             )
             stdout, stderr = await asyncio.wait_for(
-                proc.communicate(), 
-                timeout=duration + 30  # Запас на задержки сети
+                proc.communicate(),
+                timeout=duration + 30,
             )
-            
-            if proc.returncode == 0 and filepath.exists() and filepath.stat().st_size > 1000:
-                _LOGGER.info(f"✅ Архив сохранён: {filepath} ({filepath.stat().st_size} байт)")
-                self.cleanup_old_archives(intercom_id)
-                return str(filepath)
-            else:
-                error_msg = stderr.decode()[:200] if stderr else "Неизвестная ошибка"
-                _LOGGER.error(f"❌ Ошибка FFmpeg для {intercom_id}: {error_msg}")
-                return None
-                
+
+            if proc.returncode == 0:
+                size = await self.hass.async_add_executor_job(
+                    lambda p: p.stat().st_size if p.exists() else 0, filepath
+                )
+                if size > 1000:
+                    _LOGGER.info(f"Архив сохранён: {filepath} ({size} байт)")
+                    await self.cleanup_old_files(
+                        self._get_archive_dir(intercom_id), "*.mp4", self.archive_copies
+                    )
+                    return str(filepath)
+
+            error_msg = stderr.decode()[:200] if stderr else "Неизвестная ошибка"
+            _LOGGER.error(f"Ошибка FFmpeg для {intercom_id}: {error_msg}")
+            return None
+
         except asyncio.TimeoutError:
-            _LOGGER.error(f"⏱️ Превышено время скачивания архива для {intercom_id}")
+            _LOGGER.error(f"Превышено время скачивания архива для {intercom_id}")
             if proc:
                 proc.kill()
             return None
         except Exception as e:
             _LOGGER.error(f"Ошибка скачивания архива для {intercom_id}: {e}")
             return None
-    
+
     async def download_event_screenshot(self, camera_id: str, event_timestamp: int, intercom_id: str) -> str | None:
-        """Скачиваем скриншот события и сохраняем локально."""
         screenshot_dir = self._get_screenshot_dir(intercom_id)
-        screenshot_dir.mkdir(parents=True, exist_ok=True)
-        
+        await self.hass.async_add_executor_job(screenshot_dir.mkdir, True, True)
+
         dt = datetime.fromtimestamp(event_timestamp, tz=self._local_tz)
         filename = dt.strftime("%Y-%m-%d_%H-%M-%S.jpg")
         filepath = screenshot_dir / filename
-        
-        # Получаем скриншот через существующий метод
+
         screenshot_data = await self.get_event_screenshot(camera_id, event_timestamp)
-        
+
         if screenshot_data:
-            filepath.write_bytes(screenshot_data)
-            _LOGGER.info(f"✅ Скриншот сохранён: {filepath} ({len(screenshot_data)} байт)")
-            self.cleanup_old_screenshots(intercom_id)
+            await self.hass.async_add_executor_job(filepath.write_bytes, screenshot_data)
+            _LOGGER.info(f"Скриншот сохранён: {filepath} ({len(screenshot_data)} байт)")
+            await self.cleanup_old_files(
+                self._get_screenshot_dir(intercom_id), "*.jpg", self.screenshot_copies
+            )
             return str(filepath)
-        
+
         return None
-    
-    def cleanup_old_archives(self, intercom_id: str):
-        """Удаляем старые архивные видео, если превышено количество копий."""
-        archive_dir = self._get_archive_dir(intercom_id)
-        if not archive_dir.exists():
-            return
-        
-        files = sorted(archive_dir.glob("*.mp4"), key=lambda f: f.stat().st_mtime)
-        while len(files) > self.archive_copies:
-            oldest = files.pop(0)
-            oldest.unlink()
-            _LOGGER.debug(f"🗑️ Удалён старый архив: {oldest.name}")
-    
-    def cleanup_old_screenshots(self, intercom_id: str):
-        """Удаляем старые скриншоты, если превышено количество копий."""
-        screenshot_dir = self._get_screenshot_dir(intercom_id)
-        if not screenshot_dir.exists():
-            return
-        
-        files = sorted(screenshot_dir.glob("*.jpg"), key=lambda f: f.stat().st_mtime)
-        while len(files) > self.screenshot_copies:
-            oldest = files.pop(0)
-            oldest.unlink()
-            _LOGGER.debug(f"🗑️ Удалён старый скриншот: {oldest.name}")
-    
+
+    async def cleanup_old_files(self, directory: Path, pattern: str, max_copies: int):
+        """Удаляем старые файлы, если превышено количество копий (async via executor)."""
+        def _cleanup():
+            if not directory.exists():
+                return
+            files = sorted(directory.glob(pattern), key=lambda f: f.stat().st_mtime)
+            while len(files) > max_copies:
+                oldest = files.pop(0)
+                oldest.unlink()
+                _LOGGER.debug(f"Удалён старый файл: {oldest.name}")
+
+        await self.hass.async_add_executor_job(_cleanup)
+
+    # === Утилиты ===
+
     def build_device_name(self, name: str) -> str:
         return name.strip() if name else "RT Key Device"
-    
+
     def get_camera_name(self, camera_id: str) -> str:
-        """Получаем название камеры по её ID."""
-        token_info = self.camera_tokens.get(camera_id)
-        if token_info:
-            return token_info.get("title", "Неизвестная камера")
-        return "Неизвестная камера"
-    
+        info = self.camera_tokens.get(camera_id)
+        return info.title if info else "Неизвестная камера"
+
     def is_camera_available(self, camera_id: str) -> bool:
-        """Проверяем, доступна ли камера (не в списке недоступных)."""
         return camera_id not in self._unavailable_cameras
-    
+
     def register_event_listener(self, callback):
         if callback not in self._event_listeners:
             self._event_listeners.append(callback)
-    
+
     def unregister_event_listener(self, callback):
         if callback in self._event_listeners:
             self._event_listeners.remove(callback)
-    
+
     def _notify_event_listeners(self, intercom_id: str):
         for callback in self._event_listeners:
             try:
                 callback(intercom_id)
             except Exception as e:
                 _LOGGER.error(f"Ошибка в event listener: {e}")
-    
+
+    # === HTTP API (aiohttp) ===
+
+    async def _api_get(self, url: str | URL, headers: dict, timeout: int = 20) -> aiohttp.ClientResponse | None:
+        session = self._get_session()
+        try:
+            async with session.get(
+                url,
+                headers=headers,
+                timeout=aiohttp.ClientTimeout(total=timeout),
+            ) as r:
+                return r
+        except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+            _LOGGER.error(f"HTTP ошибка GET {url}: {e}")
+            return None
+
+    async def _api_post(self, url: str | URL, headers: dict, json: dict | None = None, timeout: int = 10) -> aiohttp.ClientResponse | None:
+        session = self._get_session()
+        try:
+            async with session.post(
+                url,
+                headers=headers,
+                json=json or {},
+                timeout=aiohttp.ClientTimeout(total=timeout),
+            ) as r:
+                return r
+        except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+            _LOGGER.error(f"HTTP ошибка POST {url}: {e}")
+            return None
+
+    # === Камеры ===
+
     async def _fetch_cameras(self):
-        """Получаем информацию о камерах (токены для стрима и скриншотов)."""
         if self._cameras_cache and (time.time() - self._cameras_cache_ts < 60):
             return self._cameras_cache
-        
+
         try:
             _LOGGER.debug("Запрос camera_video_data/list...")
-            r = await self.hass.async_add_executor_job(
-                functools.partial(
-                    requests.get,
-                    "https://keyapis.key.rt.ru/vc/api/v1/camera_video_data/list?paging.limit=100&paging.offset=0",
-                    headers={"Authorization": f"Bearer {self.token}"},
-                    timeout=20,
-                )
-            )
-            if r.status_code == 200:
-                data = r.json()
+            url = URL("https://keyapis.key.rt.ru/vc/api/v1/camera_video_data/list").with_query({
+                "paging.limit": 100,
+                "paging.offset": 0,
+            })
+            r = await self._api_get(url, {"Authorization": f"Bearer {self.token}"})
+            if r is None:
+                return []
+
+            if r.status == 200:
+                data = await r.json()
                 devices = data.get("data", [])
-                
+
                 if devices:
                     self.user_token = devices[0].get("userToken")
-                
+
                 for device in devices:
                     uid = device.get("uid")
                     if uid:
-                        self.camera_tokens[uid] = {
-                            "title": device.get("title", "Устройство"),
-                            "category_type": device.get("category", {}).get("type", "unknown"),
-                            "category_title": device.get("category", {}).get("title", ""),
-                            "model": device.get("model", ""),
-                            "vendor": device.get("vendor", ""),
-                            "serial_number": device.get("serialNumber", ""),
-                            "mac": device.get("mac", ""),
-                            "ip": device.get("ip", ""),
-                            "status_type": device.get("status", {}).get("type", "unknown"),
-                            "status_title": device.get("status", {}).get("title", ""),
-                            "streamer_token": device.get("streamerToken"),
-                            "screenshot_token": device.get("screenshotToken"),
-                            "user_token": device.get("userToken"),
-                        }
-                
+                        self.camera_tokens[uid] = CameraTokenInfo(
+                            title=device.get("title", "Устройство"),
+                            category_type=device.get("category", {}).get("type", "unknown"),
+                            category_title=device.get("category", {}).get("title", ""),
+                            model=device.get("model", ""),
+                            vendor=device.get("vendor", ""),
+                            serial_number=device.get("serialNumber", ""),
+                            mac=device.get("mac", ""),
+                            ip=device.get("ip", ""),
+                            status_type=device.get("status", {}).get("type", "unknown"),
+                            status_title=device.get("status", {}).get("title", ""),
+                            streamer_token=device.get("streamerToken"),
+                            screenshot_token=device.get("screenshotToken"),
+                            user_token=device.get("userToken"),
+                        )
+
                 self._cameras_cache = devices
                 self._cameras_cache_ts = time.time()
-                _LOGGER.info(f"✅ Загружено {len(self.camera_tokens)} устройств")
+                _LOGGER.info(f"Загружено {len(self.camera_tokens)} устройств")
                 return devices
             else:
-                _LOGGER.error(f"camera_video_data/list вернул {r.status_code}")
+                _LOGGER.error(f"camera_video_data/list вернул {r.status}")
         except Exception as e:
             _LOGGER.error(f"Ошибка получения камер: {e}")
         return []
-    
+
     async def refresh_tokens(self):
-        """🔄 Принудительно обновляем все токены (сбрасываем кэш)."""
         async with self._tokens_refresh_lock:
-            _LOGGER.info(" Принудительное обновление токенов...")
+            _LOGGER.info("Принудительное обновление токенов...")
             self._cameras_cache = None
             self._cameras_cache_ts = 0
             await self._fetch_cameras()
             self._tokens_invalid = False
-            _LOGGER.info(f"✅ Токены обновлены для {len(self.camera_tokens)} устройств")
-    
+            _LOGGER.info(f"Токены обновлены для {len(self.camera_tokens)} устройств")
+
+    # === Домофоны ===
+
     async def _fetch_intercoms(self):
-        """Получаем информацию о домофонах из отдельного API."""
         try:
             _LOGGER.debug("Запрос домофонов из household.key.rt.ru...")
-            r = await self.hass.async_add_executor_job(
-                functools.partial(
-                    requests.get,
-                    "https://household.key.rt.ru/api/v2/app/devices/intercom",
-                    headers={"Authorization": f"Bearer {self.token}"},
-                    timeout=15,
-                )
+            r = await self._api_get(
+                "https://household.key.rt.ru/api/v2/app/devices/intercom",
+                {"Authorization": f"Bearer {self.token}"},
+                timeout=15,
             )
-            if r.status_code == 200:
-                data = r.json()
-                
+            if r is None:
+                return {"data": {"devices": []}}
+
+            if r.status == 200:
+                data = await r.json()
                 self._build_intercom_mappings(data)
-                
+
                 devices = data.get("data", {}).get("devices", [])
                 self.intercom_ids = [str(d.get("id")) for d in devices if d.get("id")]
-                
-                _LOGGER.info(f"✅ Загружено {len(self.intercom_ids)} домофонов: {self.intercom_ids}")
+
+                _LOGGER.info(f"Загружено {len(self.intercom_ids)} домофонов: {self.intercom_ids}")
                 return data
             else:
-                _LOGGER.error(f"intercom вернул {r.status_code}")
+                _LOGGER.error(f"intercom вернул {r.status}")
         except Exception as e:
             _LOGGER.error(f"Ошибка получения домофонов: {e}")
         return {"data": {"devices": []}}
-    
+
     def _build_intercom_mappings(self, data: dict):
         devices = data.get("data", {}).get("devices", [])
         for device in devices:
@@ -456,195 +517,187 @@ class RTKeyCamerasApi:
             camera_id = device.get("camera_id")
             if intercom_id and camera_id:
                 self.intercom_camera_map[str(intercom_id)] = camera_id
-            
+
             for code in device.get("inter_codes", []):
                 rfid_id = code.get("id")
                 name = code.get("name_by_user", "")
                 if rfid_id and name:
                     self.rfid_names[rfid_id] = name
-        
+
         _LOGGER.debug(
             f"Построены маппинги: {len(self.intercom_camera_map)} камер домофонов, "
             f"{len(self.rfid_names)} ключей"
         )
-    
+
     async def get_cameras_info(self):
         await self._fetch_cameras()
-        
+
         items = []
         for uid, info in self.camera_tokens.items():
             items.append({
                 "id": uid,
-                "title": info["title"],
-                "category_type": info["category_type"],
-                "status_title": info["status_title"],
-                "model": info["model"],
-                "vendor": info["vendor"],
-                "serial_number": info["serial_number"],
-                "mac": info["mac"],
-                "ip": info["ip"],
+                "title": info.title,
+                "category_type": info.category_type,
+                "status_title": info.status_title,
+                "model": info.model,
+                "vendor": info.vendor,
+                "serial_number": info.serial_number,
+                "mac": info.mac,
+                "ip": info.ip,
                 "available": self.is_camera_available(uid),
             })
-        
+
         return {"data": {"items": items}}
-    
+
     async def get_intercoms_info(self):
-        if not self.intercom_ids:
-            return await self._fetch_intercoms()
         return await self._fetch_intercoms()
-    
+
+    # === Скриншоты ===
+
     async def get_camera_image(self, camera_id: str, retry: bool = False) -> bytes | None:
-        """Получаем скриншот камеры с обработкой ошибок 403 и 404."""
         async with self._image_cache_lock:
             if camera_id in self._image_cache:
                 img, ts = self._image_cache[camera_id]
                 if time.time() - ts < 4:
                     return img
-        
-        token_info = self.camera_tokens.get(camera_id)
-        screenshot_token = token_info.get("screenshot_token") if token_info else None
-        user_token = (token_info.get("user_token") or self.user_token) if token_info else None
-        
+
+        info = self.camera_tokens.get(camera_id)
+        screenshot_token = info.screenshot_token if info else None
+        user_token = (info.user_token or self.user_token) if info else None
+
         camera_name = self.get_camera_name(camera_id)
-        
+
         try:
-            url = f"https://key.rt.ru/screenshot/image/{self.screenshot_quality}/{camera_id}/last.jpg"
+            url = URL(f"https://key.rt.ru/screenshot/image/{self.screenshot_quality}/{camera_id}/last.jpg")
             if screenshot_token:
-                url += f"?token={screenshot_token}&_={int(time.time() * 1000)}"
-            
-            _LOGGER.debug(f"Запрос скриншота для {camera_name} ({camera_id}): {url}")
-            r = await self.hass.async_add_executor_job(
-                functools.partial(
-                    requests.get,
-                    url,
-                    headers={
-                        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-                        "Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
-                        "Referer": "https://key.rt.ru/",
-                        "Origin": "https://key.rt.ru",
-                        "X-UTOKEN": user_token or self.token,
-                    },
-                    timeout=15,
-                )
+                url = url.with_query({"token": screenshot_token, "_": str(int(time.time() * 1000))})
+
+            _LOGGER.debug(f"Запрос скриншота для {camera_name} ({camera_id})")
+            r = await self._api_get(
+                url,
+                {**_DEFAULT_HEADERS, "X-UTOKEN": user_token or self.token},
+                timeout=15,
             )
-            
-            if r.status_code == 403 and not retry:
-                _LOGGER.warning(
-                    f"⚠️ Токен для {camera_name} ({camera_id}) протух (403), запускаем обновление..."
-                )
+            if r is None:
+                return None
+
+            if r.status == 403 and not retry:
+                _LOGGER.warning(f"Токен для {camera_name} ({camera_id}) протух (403), запускаем обновление...")
                 self._tokens_invalid = True
                 await self.refresh_tokens()
                 return await self.get_camera_image(camera_id, retry=True)
-            
-            if r.status_code == 403 and retry:
-                _LOGGER.error(
-                    f"❌ Повторный 403 для {camera_name} ({camera_id}) — проблема с авторизацией"
-                )
+
+            if r.status == 403 and retry:
+                _LOGGER.error(f"Повторный 403 для {camera_name} ({camera_id}) — проблема с авторизацией")
                 return None
-            
-            if r.status_code == 404:
+
+            if r.status == 404:
                 if camera_id not in self._unavailable_cameras:
-                    _LOGGER.warning(
-                        f"📷 Камера \"{camera_name}\" ({camera_id}) недоступна (404), помечаем как offline"
-                    )
+                    _LOGGER.warning(f"Камера \"{camera_name}\" ({camera_id}) недоступна (404), помечаем как offline")
                 self._unavailable_cameras.add(camera_id)
                 return None
-            
-            if r.status_code == 200 and len(r.content) > 2000:
-                image_data = r.content
-                async with self._image_cache_lock:
-                    self._image_cache[camera_id] = (image_data, time.time())
-                
-                if camera_id in self._unavailable_cameras:
-                    self._unavailable_cameras.discard(camera_id)
-                    _LOGGER.info(f"✅ Камера \"{camera_name}\" ({camera_id}) снова доступна")
-                
-                _LOGGER.info(f"✅ Скриншот получен {camera_name} ({camera_id}) — {len(image_data)} байт")
-                return image_data
+
+            if r.status == 200:
+                image_data = await r.read()
+                if len(image_data) > 2000:
+                    async with self._image_cache_lock:
+                        self._image_cache[camera_id] = (image_data, time.time())
+
+                    if camera_id in self._unavailable_cameras:
+                        self._unavailable_cameras.discard(camera_id)
+                        _LOGGER.info(f"Камера \"{camera_name}\" ({camera_id}) снова доступна")
+
+                    _LOGGER.info(f"Скриншот получен {camera_name} ({camera_id}) — {len(image_data)} байт")
+                    return image_data
+                else:
+                    _LOGGER.warning(f"Скриншот для {camera_name} ({camera_id}): размер {len(image_data)} слишком мал")
             else:
-                _LOGGER.warning(
-                    f"Скриншот для {camera_name} ({camera_id}): статус {r.status_code}, размер {len(r.content)}"
-                )
+                _LOGGER.warning(f"Скриншот для {camera_name} ({camera_id}): статус {r.status}")
         except Exception as e:
             _LOGGER.error(f"Ошибка скриншота {camera_name} ({camera_id}): {e}")
         return None
-    
+
     async def get_event_screenshot(self, camera_id: str, event_timestamp: int) -> bytes | None:
-        """Получаем скриншот на момент события (с учётом лага)."""
-        token_info = self.camera_tokens.get(camera_id)
-        screenshot_token = token_info.get("screenshot_token") if token_info else None
-        user_token = (token_info.get("user_token") or self.user_token) if token_info else None
-        
+        info = self.camera_tokens.get(camera_id)
+        screenshot_token = info.screenshot_token if info else None
+        user_token = (info.user_token or self.user_token) if info else None
+
         adjusted_timestamp = event_timestamp - self.event_time_lag
-        
-        url = f"https://key.rt.ru/screenshot/image/{self.event_screenshot_quality}/{camera_id}/{adjusted_timestamp}.jpg"
+
+        url = URL(f"https://key.rt.ru/screenshot/image/{self.event_screenshot_quality}/{camera_id}/{adjusted_timestamp}.jpg")
         if screenshot_token:
-            url += f"?token={screenshot_token}"
-        
+            url = url.with_query({"token": screenshot_token})
+
         try:
-            _LOGGER.debug(f"Запрос скриншота события для {camera_id}: {url}")
-            r = await self.hass.async_add_executor_job(
-                functools.partial(
-                    requests.get,
-                    url,
-                    headers={
-                        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-                        "Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
-                        "Referer": "https://key.rt.ru/",
-                        "Origin": "https://key.rt.ru",
-                        "X-UTOKEN": user_token or self.token,
-                    },
-                    timeout=15,
-                )
+            _LOGGER.debug(f"Запрос скриншота события для {camera_id}")
+            r = await self._api_get(
+                url,
+                {**_DEFAULT_HEADERS, "X-UTOKEN": user_token or self.token},
+                timeout=15,
             )
-            
-            if r.status_code == 200 and len(r.content) > 1000:
-                _LOGGER.info(f"✅ Скриншот события получен {camera_id} ({len(r.content)} байт)")
-                return r.content
+            if r is None:
+                return None
+
+            if r.status == 200:
+                content = await r.read()
+                if len(content) > 1000:
+                    _LOGGER.info(f"Скриншот события получен {camera_id} ({len(content)} байт)")
+                    return content
+                else:
+                    _LOGGER.warning(f"Скриншот события {camera_id}: размер {len(content)} слишком мал")
             else:
-                _LOGGER.warning(f"Скриншот события {camera_id}: статус {r.status_code}")
+                _LOGGER.warning(f"Скриншот события {camera_id}: статус {r.status}")
         except Exception as e:
             _LOGGER.error(f"Ошибка скриншота события {camera_id}: {e}")
         return None
-    
+
+    # === Стримы и архивы ===
+
     def get_event_archive_url(self, camera_id: str, event_timestamp: int) -> str | None:
-        token_info = self.camera_tokens.get(camera_id)
-        streamer_token = token_info.get("streamer_token") if token_info else None
-        
+        info = self.camera_tokens.get(camera_id)
+        streamer_token = info.streamer_token if info else None
+
         adjusted_timestamp = event_timestamp - self.event_time_lag - self.pre_event_seconds
-        
-        base = f"https://live-vdk4.camera.rt.ru/stream/{camera_id}/{adjusted_timestamp}.mp4"
-        params = "mp4-fragment-length=0.5&mp4-use-speed=0&mp4-afiller=1"
-        
+
+        url = URL(f"https://live-vdk4.camera.rt.ru/stream/{camera_id}/{adjusted_timestamp}.mp4").with_query({
+            "mp4-fragment-length": "0.5",
+            "mp4-use-speed": "0",
+            "mp4-afiller": "1",
+        })
         if streamer_token:
-            return f"{base}?{params}&token={streamer_token}"
-        return f"{base}?{params}"
-    
+            url = url.update_query({"token": streamer_token})
+        return str(url)
+
     async def get_camera_stream_url(self, camera_id: str) -> str | None:
-        token_info = self.camera_tokens.get(camera_id)
-        streamer_token = token_info.get("streamer_token") if token_info else None
-        
-        base = f"https://live-vdk4.camera.rt.ru/stream/{camera_id}/live.mp4"
-        params = "mp4-fragment-length=0.5&mp4-use-speed=0&mp4-afiller=1"
+        info = self.camera_tokens.get(camera_id)
+        streamer_token = info.streamer_token if info else None
+
+        url = URL(f"https://live-vdk4.camera.rt.ru/stream/{camera_id}/live.mp4").with_query({
+            "mp4-fragment-length": "0.5",
+            "mp4-use-speed": "0",
+            "mp4-afiller": "1",
+        })
         if streamer_token:
-            return f"{base}?{params}&token={streamer_token}"
-        return f"{base}?{params}"
-    
+            url = url.update_query({"token": streamer_token})
+        return str(url)
+
+    # === Домофон: открытие ===
+
     async def open_intercom(self, intercom_id: str):
         try:
-            await self.hass.async_add_executor_job(
-                functools.partial(
-                    requests.post,
-                    f"https://household.key.rt.ru/api/v2/app/devices/{intercom_id}/open",
-                    headers={"Authorization": f"Bearer {self.token}"},
-                    json={},
-                    timeout=10,
-                )
+            r = await self._api_post(
+                f"https://household.key.rt.ru/api/v2/app/devices/{intercom_id}/open",
+                {"Authorization": f"Bearer {self.token}"},
             )
-            _LOGGER.info(f"✅ Открыт домофон {intercom_id}")
+            if r and r.status in (200, 204):
+                _LOGGER.info(f"Открыт домофон {intercom_id}")
+            elif r:
+                _LOGGER.error(f"Ошибка открытия домофона {intercom_id}: статус {r.status}")
         except Exception as e:
             _LOGGER.error(f"Ошибка открытия {intercom_id}: {e}")
-    
+
+    # === Время и события ===
+
     def _parse_iso_to_timestamp(self, iso_str: str) -> int:
         try:
             dt = datetime.fromisoformat(iso_str.replace("Z", "+00:00"))
@@ -652,7 +705,7 @@ class RTKeyCamerasApi:
         except Exception as e:
             _LOGGER.error(f"Ошибка парсинга времени {iso_str}: {e}")
             return 0
-    
+
     def _format_local_time(self, iso_str: str) -> str:
         try:
             dt_utc = datetime.fromisoformat(iso_str.replace("Z", "+00:00"))
@@ -661,14 +714,14 @@ class RTKeyCamerasApi:
         except Exception as e:
             _LOGGER.error(f"Ошибка форматирования времени {iso_str}: {e}")
             return iso_str
-    
+
     def _get_event_description(self, event: dict) -> str:
         event_type = event.get("event_type", "")
         rfid_id = event.get("rfid_id")
-        
+
         if rfid_id and rfid_id in self.rfid_names:
             return self.rfid_names[rfid_id]
-        
+
         descriptions = {
             "api_open_remote": "Открытие через приложение",
             "face_open_remote": "Открытие по лицу",
@@ -677,59 +730,53 @@ class RTKeyCamerasApi:
             "rfid_open_local": "Открытие по ключу",
             "dtmf_open_local": "Открытие через телефон",
         }
-        
+
         if event.get("rfid") and event_type == "rfid_open_local":
             return f"Ключ {event.get('rfid')}"
-        
+
         return descriptions.get(event_type, event_type)
-    
+
     async def get_last_event(self, intercom_id: str) -> dict | None:
         try:
             now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-            url = (
-                f"https://events.key.rt.ru/api/v2/events/list?"
-                f"begin_raised_at=2018-01-01T00:00:00Z&"
-                f"end_raised_at={now_iso}&"
-                f"device_ids={intercom_id}&"
-                f"limit=1&"
-                f"sort_by=raised_at&"
-                f"offset=0"
+            url = URL("https://events.key.rt.ru/api/v2/events/list").with_query({
+                "begin_raised_at": "2018-01-01T00:00:00Z",
+                "end_raised_at": now_iso,
+                "device_ids": intercom_id,
+                "limit": "1",
+                "sort_by": "raised_at",
+                "offset": "0",
+            })
+
+            r = await self._api_get(
+                url,
+                {"Authorization": f"Bearer {self.token}", "Accept": "application/json"},
+                timeout=15,
             )
-            
-            r = await self.hass.async_add_executor_job(
-                functools.partial(
-                    requests.get,
-                    url,
-                    headers={
-                        "Authorization": f"Bearer {self.token}",
-                        "Accept": "application/json",
-                    },
-                    timeout=15,
-                )
-            )
-            
-            if r.status_code == 200:
-                data = r.json()
+            if r is None:
+                return None
+
+            if r.status == 200:
+                data = await r.json()
                 items = data.get("data", {}).get("items", [])
                 if items:
                     return items[0]
             else:
-                _LOGGER.warning(f"Events API вернул {r.status_code} для {intercom_id}")
+                _LOGGER.warning(f"Events API вернул {r.status} для {intercom_id}")
         except Exception as e:
             _LOGGER.error(f"Ошибка получения событий для {intercom_id}: {e}")
         return None
-    
+
     async def update_last_event(self, intercom_id: str, event: dict):
         camera_id = self.intercom_camera_map.get(str(intercom_id))
         if not camera_id:
             _LOGGER.warning(f"Не найден camera_id для домофона {intercom_id}")
             return
-        
+
         event_timestamp = self._parse_iso_to_timestamp(event.get("raised_at", ""))
         if not event_timestamp:
             return
-        
-        # 🆕 Скачиваем скриншот на диск (если включено)
+
         screenshot_path = None
         screenshot_error = None
         if self.screenshot_copies > 0:
@@ -738,8 +785,7 @@ class RTKeyCamerasApi:
             except Exception as e:
                 screenshot_error = str(e)
                 _LOGGER.error(f"Ошибка скачивания скриншота для {intercom_id}: {e}")
-        
-        # 🆕 Скачиваем архив на диск (если включено)
+
         archive_path = None
         archive_error = None
         if self.archive_copies > 0:
@@ -748,7 +794,7 @@ class RTKeyCamerasApi:
             except Exception as e:
                 archive_error = str(e)
                 _LOGGER.error(f"Ошибка скачивания архива для {intercom_id}: {e}")
-        
+
         self.last_events[intercom_id] = {
             "event": event,
             "camera_id": camera_id,
@@ -761,49 +807,54 @@ class RTKeyCamerasApi:
             "screenshot_error": screenshot_error,
             "archive_error": archive_error,
         }
-        
+
         _LOGGER.info(
-            f"🔔 Новое событие для домофона {intercom_id}: "
+            f"Новое событие для домофона {intercom_id}: "
             f"{self.last_events[intercom_id]['description']} "
             f"в {self.last_events[intercom_id]['local_time']}"
         )
-        
+
         self._notify_event_listeners(intercom_id)
-    
+
     async def _events_polling_loop(self):
-        _LOGGER.info(f"🔄 Запущен цикл опроса событий (интервал {self.events_refresh_interval}с)")
-        
+        _LOGGER.info(f"Запущен цикл опроса событий (интервал {self.events_refresh_interval}с)")
+
         while True:
             try:
-                for intercom_id in self.intercom_ids:
-                    last_event = await self.get_last_event(intercom_id)
-                    if not last_event:
+                tasks = [self.get_last_event(id) for id in self.intercom_ids]
+                results = await asyncio.gather(*tasks, return_exceptions=True)
+
+                for intercom_id, result in zip(self.intercom_ids, results):
+                    if isinstance(result, Exception):
+                        _LOGGER.error(f"Ошибка опроса событий для {intercom_id}: {result}")
                         continue
-                    
-                    request_id = last_event.get("request_id")
+                    if not result:
+                        continue
+
+                    request_id = result.get("request_id")
                     last_request_id = self._last_request_ids.get(intercom_id)
-                    
+
                     if request_id and request_id != last_request_id:
                         self._last_request_ids[intercom_id] = request_id
-                        await self.update_last_event(intercom_id, last_event)
-                
+                        await self.update_last_event(intercom_id, result)
+
             except Exception as e:
                 _LOGGER.error(f"Ошибка в цикле опроса событий: {e}")
-            
+
             await asyncio.sleep(self.events_refresh_interval)
-    
+
     async def start_events_polling(self):
         if not self.events_enabled:
             _LOGGER.info("Отслеживание событий отключено")
             return
-        
+
         if self._events_polling_task and not self._events_polling_task.done():
             return
-        
+
         await self._fetch_intercoms()
-        
+
         self._events_polling_task = asyncio.create_task(self._events_polling_loop())
-    
+
     async def stop_events_polling(self):
         if self._events_polling_task and not self._events_polling_task.done():
             self._events_polling_task.cancel()
@@ -812,6 +863,7 @@ class RTKeyCamerasApi:
             except asyncio.CancelledError:
                 pass
             self._events_polling_task = None
+        await self._close_session()
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
@@ -819,15 +871,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     hass.data.setdefault(DOMAIN, {})[entry.entry_id] = {
         "cameras_api": cameras_api
     }
-    
-    # 🆕 Инициализация (проверка FFmpeg)
+
     await cameras_api.async_initialize()
-    
+
     entry.add_update_listener(update_listener)
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
-    
+
     await cameras_api.start_events_polling()
-    
+
     return True
 
 

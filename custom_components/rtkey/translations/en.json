@@ -18,6 +18,7 @@
           "event_sensor_enabled": "Create event sensor entity",
           "archive_path": "Archive storage path",
           "archive_copies": "Number of video copies (0 = disabled)",
+          "archive_duration": "Archive video duration (sec)",
           "screenshot_copies": "Number of screenshot copies (0 = disabled)"
         },
         "data_description": {
@@ -25,6 +26,7 @@
           "camera_image_refresh_interval": "0 — disable periodic screenshots",
           "archive_path": "Relative to /media/ folder (e.g.: RTKey)",
           "archive_copies": "Maximum number of saved videos per intercom",
+          "archive_duration": "Duration of archived video fragment per event",
           "screenshot_copies": "Maximum number of saved screenshots per intercom"
         }
       }
@@ -49,6 +51,7 @@
           "event_sensor_enabled": "Create event sensor entity",
           "archive_path": "Archive storage path",
           "archive_copies": "Number of video copies (0 = disabled)",
+          "archive_duration": "Archive video duration (sec)",
           "screenshot_copies": "Number of screenshot copies (0 = disabled)"
         },
         "data_description": {
@@ -56,6 +59,7 @@
           "camera_image_refresh_interval": "0 — disable periodic screenshots",
           "archive_path": "Relative to /media/ folder (e.g.: RTKey)",
           "archive_copies": "Maximum number of saved videos per intercom",
+          "archive_duration": "Duration of archived video fragment per event",
           "screenshot_copies": "Maximum number of saved screenshots per intercom"
         }
       }
