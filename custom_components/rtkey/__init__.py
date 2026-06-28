@@ -78,7 +78,7 @@ OPTIONS_SCHEMA = {
     vol.Optional(CONF_EVENTS_ENABLED, default=True): bool,
     vol.Optional(CONF_EVENTS_REFRESH_INTERVAL, default=15): selector.NumberSelector(
         selector.NumberSelectorConfig(
-            min=5, max=60, step=5,
+            min=5, max=3600, step=5,
             mode=selector.NumberSelectorMode.SLIDER,
             unit_of_measurement="сек",
         )
