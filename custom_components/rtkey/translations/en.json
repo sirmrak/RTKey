@@ -24,7 +24,7 @@
         "data_description": {
           "token": "Get token via browser developer tools (F12) on key.rt.ru",
           "camera_image_refresh_interval": "0 — disable periodic screenshots",
-          "archive_path": "Relative to /media/ folder (e.g.: RTKey)",
+          "archive_path": "Subfolder name inside HA media folder (e.g.: RTKey)",
           "archive_copies": "Maximum number of saved videos per intercom",
           "archive_duration": "Duration of archived video fragment per event",
           "screenshot_copies": "Maximum number of saved screenshots per intercom"
@@ -57,7 +57,7 @@
         "data_description": {
           "token": "Get token via browser developer tools (F12) on key.rt.ru",
           "camera_image_refresh_interval": "0 — disable periodic screenshots",
-          "archive_path": "Relative to /media/ folder (e.g.: RTKey)",
+          "archive_path": "Subfolder name inside HA media folder (e.g.: RTKey)",
           "archive_copies": "Maximum number of saved videos per intercom",
           "archive_duration": "Duration of archived video fragment per event",
           "screenshot_copies": "Maximum number of saved screenshots per intercom"

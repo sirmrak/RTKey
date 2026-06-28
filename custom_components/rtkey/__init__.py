@@ -112,7 +112,7 @@ OPTIONS_SCHEMA = {
         )
     ),
     # Настройки локального хранения
-    vol.Optional(CONF_ARCHIVE_PATH, default="media/RTKey"): str,
+    vol.Optional(CONF_ARCHIVE_PATH, default="RTKey"): str,
     vol.Optional(CONF_ARCHIVE_COPIES, default=5): selector.NumberSelector(
         selector.NumberSelectorConfig(
             min=0, max=10, step=1,
@@ -177,7 +177,7 @@ class RTKeyCamerasApi:
         self.event_sensor_enabled = entry.options.get(CONF_EVENT_SENSOR_ENABLED, True)
 
         # Настройки локального хранения
-        self.archive_path = entry.options.get(CONF_ARCHIVE_PATH, "media/RTKey")
+        self.archive_path = entry.options.get(CONF_ARCHIVE_PATH, "RTKey")
         self.archive_copies = entry.options.get(CONF_ARCHIVE_COPIES, 5)
         self.archive_duration = entry.options.get(CONF_ARCHIVE_DURATION, 30)
         self.screenshot_copies = entry.options.get(CONF_SCREENSHOT_COPIES, 10)
@@ -254,10 +254,20 @@ class RTKeyCamerasApi:
     # === Медиа-пути ===
 
     def _get_media_base_path(self) -> Path:
+        """Получаем базовый путь для медиафайлов.
+
+        HA default media folder — hass.config.path("media").
+        Если user configured media_dirs в configuration.yaml — используем
+        ключ 'media' (default) или 'local' если 'media' отсутствует.
+        """
         media_dirs = self.hass.config.media_dirs
-        if media_dirs and "media" in media_dirs:
-            return Path(media_dirs["media"])
-        return Path("/media")
+        if media_dirs:
+            if "media" in media_dirs:
+                return Path(media_dirs["media"])
+            if "local" in media_dirs:
+                return Path(media_dirs["local"])
+
+        return Path(self.hass.config.path("media"))
 
     def _get_archive_dir(self, intercom_id: str) -> Path:
         return self._get_media_base_path() / self.archive_path / "archives" / intercom_id
