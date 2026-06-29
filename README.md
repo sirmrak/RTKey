@@ -1,3 +1,4 @@
+<img src="custom_components/rtkey/icon.png" width="128"> </img>
 # RT Key Integration for Home Assistant
 
 [![Home Assistant](https://img.shields.io/badge/Home%20Assistant-Integration-blue)](https://www.home-assistant.io/)

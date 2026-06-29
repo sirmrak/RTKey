@@ -304,6 +304,10 @@ class RTKeyCamerasApi:
         filename = dt.strftime("%Y-%m-%d_%H-%M-%S.mp4")
         filepath = archive_dir / filename
 
+        if await self.hass.async_add_executor_job(lambda p: p.exists() and p.stat().st_size > 0, filepath):
+            _LOGGER.info(f"Архив уже существует: {filepath}")
+            return str(filepath)
+
         duration = self.archive_duration
 
         _LOGGER.info(f"Скачиваем архив для {intercom_id}: {duration} сек, файл: {filename}")
@@ -359,6 +363,10 @@ class RTKeyCamerasApi:
         dt = datetime.fromtimestamp(event_timestamp, tz=self._local_tz)
         filename = dt.strftime("%Y-%m-%d_%H-%M-%S.jpg")
         filepath = screenshot_dir / filename
+
+        if await self.hass.async_add_executor_job(lambda p: p.exists() and p.stat().st_size > 0, filepath):
+            _LOGGER.info(f"Скриншот уже существует: {filepath}")
+            return str(filepath)
 
         screenshot_data = await self.get_event_screenshot(camera_id, event_timestamp)
 
