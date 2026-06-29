@@ -4,7 +4,7 @@
   "documentation": "https://github.com/sirmrak/RTKey",
   "issue_tracker": "https://github.com/sirmrak/RTKey/issues",
   "iot_class": "cloud_polling",
-  "version": "1.2.1",
+  "version": "1.2.2",
   "requirements": [],
   "config_flow": true,
   "codeowners": ["@sirmrak"]
