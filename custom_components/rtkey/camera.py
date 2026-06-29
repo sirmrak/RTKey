@@ -1,4 +1,3 @@
-import datetime
 from pathlib import Path
 from typing import Any
 
@@ -8,7 +7,7 @@ from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity import EntityCategory
 
-from . import _LOGGER, DOMAIN, RTKeyCamerasApi, TOKEN_REFRESH_BUFFER
+from . import _LOGGER, DOMAIN, RTKeyCamerasApi
 
 
 async def async_setup_entry(
@@ -63,37 +62,6 @@ class RTKeyCamera(Camera):
 
         self._attr_unique_id = f"camera_{self.camera_id}"
         self._attr_name = self.device_name
-
-        self._unsub_stream_refresh: Any = None
-
-    async def async_added_to_hass(self) -> None:
-        await super().async_added_to_hass()
-
-        self._unsub_stream_refresh = async_track_time_interval(
-            self.hass,
-            self._stream_refresh,
-            datetime.timedelta(seconds=TOKEN_REFRESH_BUFFER),
-        )
-        _LOGGER.debug(f"Таймер обновления стрима запущен для {self.device_name}")
-
-    async def async_will_remove_from_hass(self) -> None:
-        if self._unsub_stream_refresh:
-            self._unsub_stream_refresh()
-            self._unsub_stream_refresh = None
-        await super().async_will_remove_from_hass()
-
-    async def _stream_refresh(self, now: datetime.datetime) -> None:
-        try:
-            if self.cameras_api._tokens_invalid:
-                _LOGGER.debug(f"Обнаружены протухшие токены, обновляем для {self.device_name}")
-                await self.cameras_api.refresh_tokens()
-
-            url = await self.stream_source()
-            if url and self.stream and getattr(self.stream, "source", None) != url:
-                _LOGGER.debug(f"Обновляем URL стрима для {self.device_name}")
-                self.stream.update_source(url)
-        except Exception as e:
-            _LOGGER.error(f"Ошибка обновления стрима для {self.camera_id}: {e}")
 
     async def stream_source(self) -> str | None:
         return await self.cameras_api.get_camera_stream_url(self.camera_id)
