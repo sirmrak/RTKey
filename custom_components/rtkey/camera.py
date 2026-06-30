@@ -1,7 +1,7 @@
 from pathlib import Path
 from typing import Any
 
-from homeassistant.components.camera import Camera
+from homeassistant.components.camera import Camera, CameraEntityFeature
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.device_registry import DeviceInfo
@@ -37,6 +37,8 @@ async def async_setup_entry(
 
 class RTKeyCamera(Camera):
     """Live-камера (для всех устройств — и камер, и домофонов)."""
+
+    _attr_supported_features = CameraEntityFeature.STREAM
 
     def __init__(
         self,
@@ -108,10 +110,11 @@ class RTKeyCamera(Camera):
 
 
 class RTKeyEventCamera(Camera):
-    """Архив события: thumbnail-скриншот + ссылка на видео-файл."""
+    """Архив события: проигрывание сохранённого видео."""
 
     _attr_should_poll = False
     _attr_entity_category = EntityCategory.DIAGNOSTIC
+    _attr_supported_features = CameraEntityFeature.STREAM
 
     def __init__(
         self,
@@ -175,17 +178,24 @@ class RTKeyEventCamera(Camera):
             self._archive_error = archive_error
             self.async_write_ha_state()
 
+    async def stream_source(self) -> str | None:
+        if self._archive_path and Path(self._archive_path).exists():
+            return f"file://{self._archive_path}"
+        return None
+
     async def async_camera_image(
         self, width: int | None = None, height: int | None = None
     ) -> bytes | None:
-        """Скриншот камеры как thumbnail для карточки."""
-        if self.camera_id:
-            return await self.cameras_api.get_camera_image(self.camera_id)
+        event_info = self.cameras_api.last_events.get(self.intercom_id)
+        if event_info and event_info.get("screenshot_path"):
+            path = Path(event_info["screenshot_path"])
+            if path.exists():
+                return await self.hass.async_add_executor_job(path.read_bytes)
         return None
 
     @property
     def available(self) -> bool:
-        return self.camera_id is not None and self.cameras_api.is_camera_available(self.camera_id)
+        return self._archive_path is not None and Path(self._archive_path).exists()
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:

@@ -697,8 +697,8 @@ class RTKeyCamerasApi:
             url = url.update_query({"token": streamer_token})
         return str(url)
 
-    async def get_camera_stream_url(self, camera_id: str, retry: bool = False) -> str | None:
-        if self._tokens_invalid and not retry:
+    async def get_camera_stream_url(self, camera_id: str) -> str | None:
+        if self._tokens_invalid:
             _LOGGER.debug(f"Токены протухшие, обновляем перед запросом стрима для {camera_id}")
             await self.refresh_tokens()
 
@@ -712,27 +712,6 @@ class RTKeyCamerasApi:
         })
         if streamer_token:
             url = url.update_query({"token": streamer_token})
-
-        r = await self._api_get(url, _DEFAULT_HEADERS, timeout=10)
-        if r is None:
-            return str(url)
-
-        if r.status == 403 and not retry:
-            camera_name = self.get_camera_name(camera_id)
-            _LOGGER.warning(f"Токен стрима для {camera_name} ({camera_id}) протух (403), запускаем обновление...")
-            self._tokens_invalid = True
-            await self.refresh_tokens()
-            return await self.get_camera_stream_url(camera_id, retry=True)
-
-        if r.status == 403 and retry:
-            camera_name = self.get_camera_name(camera_id)
-            _LOGGER.error(f"Повторный 403 для стрима {camera_name} ({camera_id}) — проблема с авторизацией")
-            return None
-
-        if r.status == 200:
-            return str(url)
-
-        _LOGGER.warning(f"Стрим для {camera_id}: статус {r.status}")
         return str(url)
 
     # === Домофон: открытие ===
